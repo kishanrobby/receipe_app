@@ -6,7 +6,6 @@ import 'package:flutter_complete_app/Utils/constants.dart';
 import 'package:flutter_complete_app/Widget/my_icon_button.dart';
 import 'package:flutter_complete_app/Widget/quantity_increment_decrement.dart';
 import 'package:flutter_complete_app/Views/rating_popup.dart';
-import 'package:flutter_complete_app/Views/cooking_screen.dart';
 import 'package:iconsax/iconsax.dart';
 import 'package:provider/provider.dart';
 
@@ -19,20 +18,65 @@ class RecipeDetailScreen extends StatefulWidget {
 }
 
 class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
+  bool _hasRated = false;
+  bool _isCheckingRating = true; // Add this to track loading state
+
   @override
   void initState() {
     super.initState();
-    // Initialize base ingredient amounts after the widget is built
     WidgetsBinding.instance.addPostFrameCallback((_) {
       List<double> baseAmounts = widget.documentSnapshot['ingredientsAmount']
           .map<double>((amount) => double.parse(amount.toString()))
           .toList();
       Provider.of<QuantityProvider>(context, listen: false)
           .setBaseIngredientAmounts(baseAmounts);
+
+      // Check if user has already rated this recipe
+      _checkUserRating();
     });
   }
 
-// we have a Spelling mistake that's what we face a error, be carefully, all items name must be same in firebase
+// Add this method to check if the user has already rated this recipe
+  Future<void> _checkUserRating() async {
+    setState(() {
+      _isCheckingRating = true;
+    });
+
+    try {
+      // Get current user email from active session
+      final QuerySnapshot sessionQuery = await FirebaseFirestore.instance
+          .collection('sessions')
+          .where('isActive', isEqualTo: true)
+          .limit(1)
+          .get();
+
+      if (sessionQuery.docs.isNotEmpty) {
+        final String userEmail = sessionQuery.docs.first['email'];
+
+        // Check if this user has already rated this recipe
+        final QuerySnapshot ratingQuery = await FirebaseFirestore.instance
+            .collection('userRatings')
+            .where('userEmail', isEqualTo: userEmail)
+            .where('recipeId', isEqualTo: widget.documentSnapshot.id)
+            .limit(1)
+            .get();
+
+        if (ratingQuery.docs.isNotEmpty) {
+          // User has already rated this recipe
+          setState(() {
+            _hasRated = true;
+          });
+        }
+      }
+    } catch (e) {
+      print('Error checking user rating: $e');
+    } finally {
+      setState(() {
+        _isCheckingRating = false;
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final provider = FavoriteProvider.of(context);
@@ -50,7 +94,6 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
           children: [
             Stack(
               children: [
-                // for image
                 Container(
                   height: MediaQuery.of(context).size.height / 2.1,
                   decoration: BoxDecoration(
@@ -62,7 +105,6 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                     ),
                   ),
                 ),
-                // for back button
                 Positioned(
                   top: 40,
                   left: 10,
@@ -75,10 +117,10 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                             Navigator.pop(context);
                           }),
                       const Spacer(),
-                      // MyIconButton(
-                      //   icon: Iconsax.notification,
-                      //   pressed: () {},
-                      // )
+                      MyIconButton(
+                        icon: Iconsax.notification,
+                        pressed: () {},
+                      )
                     ],
                   ),
                 ),
@@ -97,7 +139,6 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                 ),
               ],
             ),
-            // for drag handle
             Center(
               child: Container(
                 width: 40,
@@ -161,7 +202,6 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                     ],
                   ),
                   const SizedBox(height: 10),
-                  // for rating
                   Row(
                     children: [
                       const Icon(
@@ -186,31 +226,46 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                       const Spacer(),
                       ElevatedButton(
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: kprimaryColor,
+                          backgroundColor:
+                          _hasRated ? Colors.grey : kprimaryColor,
                           padding: const EdgeInsets.symmetric(
                               horizontal: 18, vertical: 10),
                           foregroundColor: Colors.white,
                         ),
-                        onPressed: () {
+                        onPressed: _isCheckingRating || _hasRated
+                            ? null
+                            : () {
                           showDialog(
                             context: context,
                             builder: (context) => RatingDialog(
-                              recipeTitle: widget.documentSnapshot['name'],
+                              recipeTitle:
+                              widget.documentSnapshot['name'],
                               onRatingSubmitted: (rating) async {
-                                // Get current values
-                                final currentRate = double.parse(
-                                    widget.documentSnapshot['rate'].toString());
-                                final currentReviews = int.parse(widget
-                                    .documentSnapshot['reviews']
-                                    .toString());
+                                // Get current user email
+                                final QuerySnapshot sessionQuery = await FirebaseFirestore.instance
+                                    .collection('sessions')
+                                    .where('isActive', isEqualTo: true)
+                                    .limit(1)
+                                    .get();
 
-                                // Calculate new average rating
+                                if (sessionQuery.docs.isEmpty) return;
+
+                                final String userEmail = sessionQuery.docs.first['email'];
+
+                                final currentRate = double.parse(
+                                    widget.documentSnapshot['rate']
+                                        .toString());
+                                final currentReviews = int.parse(
+                                    widget.documentSnapshot['reviews']
+                                        .toString());
+
                                 final newReviews = currentReviews + 1;
                                 final newRate =
-                                    ((currentRate * currentReviews) + rating) /
+                                    ((currentRate * currentReviews) +
+                                        rating) /
                                         newReviews;
 
-                                // Update Firestore
+                                // Update recipe rating
                                 await FirebaseFirestore.instance
                                     .collection('recipes')
                                     .doc(widget.documentSnapshot.id)
@@ -219,20 +274,35 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                                   'reviews': newReviews.toString(),
                                 });
 
-                                // Update local state
+                                // Store user rating
+                                await FirebaseFirestore.instance
+                                    .collection('userRatings')
+                                    .add({
+                                  'userEmail': userEmail,
+                                  'recipeId': widget.documentSnapshot.id,
+                                  'rating': rating,
+                                  'timestamp': FieldValue.serverTimestamp(),
+                                });
+
                                 setState(() {
-                                  widget.documentSnapshot.reference.update({
-                                    'rate': newRate.toStringAsFixed(1),
-                                    'reviews': newReviews.toString(),
-                                  });
+                                  _hasRated = true;
                                 });
                               },
                             ),
                           );
                         },
-                        child: const Text(
-                          "Rate this recipe",
-                          style: TextStyle(
+                        child: _isCheckingRating
+                            ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(
+                            color: Colors.white,
+                            strokeWidth: 2,
+                          ),
+                        )
+                            : Text(
+                          _hasRated ? "Already rated" : "Rate this recipe",
+                          style: const TextStyle(
                             fontWeight: FontWeight.bold,
                             fontSize: 12,
                           ),
@@ -272,71 +342,68 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                     ],
                   ),
                   const SizedBox(height: 10),
-                  // list of ingredients
                   Column(
                     children: [
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          // ingredients images
                           Column(
                             children: widget
                                 .documentSnapshot['ingredientsImage']
                                 .map<Widget>(
                                   (imageUrl) => Container(
-                                    height: 60,
-                                    width: 60,
-                                    margin: const EdgeInsets.only(bottom: 15),
-                                    decoration: BoxDecoration(
-                                      borderRadius: BorderRadius.circular(20),
-                                      image: DecorationImage(
-                                        fit: BoxFit.cover,
-                                        image: NetworkImage(
-                                          imageUrl,
-                                        ),
-                                      ),
+                                height: 60,
+                                width: 60,
+                                margin: const EdgeInsets.only(bottom: 15),
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(20),
+                                  image: DecorationImage(
+                                    fit: BoxFit.cover,
+                                    image: NetworkImage(
+                                      imageUrl,
                                     ),
                                   ),
-                                )
+                                ),
+                              ),
+                            )
                                 .toList(),
                           ),
                           const SizedBox(width: 20),
-                          // ingredients name
                           Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
-                            children: widget.documentSnapshot['ingredientsName']
+                            children: widget
+                                .documentSnapshot['ingredientsName']
                                 .map<Widget>((ingredient) => Container(
-                                      height: 60,
-                                      margin: const EdgeInsets.only(bottom: 15),
-                                      child: Center(
-                                        child: Text(
-                                          ingredient,
-                                          style: TextStyle(
-                                            fontSize: 16,
-                                            color: Colors.grey.shade400,
-                                          ),
-                                        ),
-                                      ),
-                                    ))
+                              height: 60,
+                              margin: const EdgeInsets.only(bottom: 15),
+                              child: Center(
+                                child: Text(
+                                  ingredient,
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    color: Colors.grey.shade400,
+                                  ),
+                                ),
+                              ),
+                            ))
                                 .toList(),
                           ),
-                          // ingredient amount
                           const SizedBox(width: 20),
                           Column(
                             children: quantityProvider.updateIngredientAmounts
                                 .map<Widget>((amount) => Container(
-                                      height: 60,
-                                      margin: const EdgeInsets.only(bottom: 15),
-                                      child: Center(
-                                        child: Text(
-                                          "${amount}gm",
-                                          style: TextStyle(
-                                            fontSize: 16,
-                                            color: Colors.grey.shade400,
-                                          ),
-                                        ),
-                                      ),
-                                    ))
+                              height: 60,
+                              margin: const EdgeInsets.only(bottom: 15),
+                              child: Center(
+                                child: Text(
+                                  "${amount}gm",
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    color: Colors.grey.shade400,
+                                  ),
+                                ),
+                              ),
+                            ))
                                 .toList(),
                           ),
                         ],
@@ -353,39 +420,22 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
     );
   }
 
-  Widget startCookingAndFavoriteButton(FavoriteProvider provider) {
+  FloatingActionButton startCookingAndFavoriteButton(
+      FavoriteProvider provider) {
     return FloatingActionButton.extended(
       backgroundColor: Colors.transparent,
       elevation: 0,
-      onPressed: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => CookingScreen(
-              documentSnapshot: widget.documentSnapshot,
-            ),
-          ),
-        );
-      },
+      onPressed: () {},
       label: Row(
         children: [
           ElevatedButton(
             style: ElevatedButton.styleFrom(
               backgroundColor: kprimaryColor,
               padding:
-                  const EdgeInsets.symmetric(horizontal: 100, vertical: 13),
+              const EdgeInsets.symmetric(horizontal: 100, vertical: 13),
               foregroundColor: Colors.white,
             ),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => CookingScreen(
-                    documentSnapshot: widget.documentSnapshot,
-                  ),
-                ),
-              );
-            },
+            onPressed: () {},
             child: const Text(
               "Start Cooking",
               style: TextStyle(
